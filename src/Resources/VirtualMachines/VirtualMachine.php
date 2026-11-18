@@ -9,6 +9,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use InvalidArgumentException;
 use JsonSerializable;
+use Proxmox\Exceptions\GuestPasswordResetException;
 use Proxmox\Exceptions\InvalidConfigurationException;
 use Proxmox\Exceptions\UnexpectedResponseException;
 use Proxmox\Proxmox;
@@ -16,6 +17,7 @@ use Proxmox\Resources\Tasks\Task;
 use Proxmox\Support\Identifier;
 use Proxmox\Support\ResourceData;
 use Proxmox\Support\ResponseData;
+use SensitiveParameter;
 
 /**
  * A live VM API resource with an optional in-memory status snapshot.
@@ -98,6 +100,19 @@ class VirtualMachine implements Arrayable, JsonSerializable
         }
 
         return $username;
+    }
+
+    /**
+     * Reset an existing local account's password through the QEMU guest agent.
+     *
+     * @throws ConnectionException
+     * @throws GuestPasswordResetException
+     * @throws InvalidArgumentException
+     * @throws InvalidConfigurationException
+     */
+    public function resetPassword(string $username, #[SensitiveParameter] string $password): void
+    {
+        $this->guestAgent()->resetPassword($username, $password);
     }
 
     /**

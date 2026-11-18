@@ -1,7 +1,7 @@
 ---
 name: proxmox-development
 description: >
-  Integrate a Laravel application with the Proxmox REST API using this package.
+  Integrate a Laravel application with the Proxmox VE 9.x REST API using this package.
 license: MIT
 metadata:
   author: Nima Asaadi
@@ -9,7 +9,7 @@ metadata:
 
 # Proxmox
 
-Use this skill when a Laravel application integrates with Proxmox through `jaryan-host/proxmox`.
+Use this skill when a Laravel application integrates with Proxmox VE 9.x through `jaryan-host/proxmox`.
 
 ## Primary Goal
 
@@ -19,7 +19,7 @@ Store named cluster connections and use the live API. The package persists conne
 
 ### 1. Install and store connections
 
-- Requires PHP `^8.3`, Laravel `^12.0` or `^13.0` with a compatible PHP version, a database, and an application encryption key.
+- Requires PHP `^8.3`, Laravel `^12.0` or `^13.0` with a compatible PHP version, Proxmox VE 9.x, a database, and an application encryption key. Compatibility with earlier Proxmox VE major versions is unverified.
 - Run `composer require jaryan-host/proxmox`, `php artisan proxmox:install --migrate`, then `php artisan proxmox:create-cluster hetzner`.
 - The installer publishes configuration and one migration for `clusters`. `--migrate` runs all pending Laravel migrations. Rerun the installer to skip already published files.
 - The connection command prompts for an API URL including `/api2/json`, a token ID in `user@realm!token` form, and a hidden token secret. Optional flags: `--url`, `--token-id`, `--timeout`, `--connect-timeout`, `--ca-bundle`, and `--insecure`. There is no secret command-line option.
@@ -81,6 +81,7 @@ $vm->growDisk('scsi0', 10)->wait();
 - Pass `'ciupgrade' => false` during creation to disable Cloud-Init's automatic package upgrades on first boot.
 - For QCOW2 or RAW imports, the image must already be on Proxmox import storage. `images($storage)` lists both formats. Use an import volume ID ending in `.qcow2` or `.raw`, such as `local:import/ubuntu-22.04-lts-server-cloudimg-amd64.img.raw`. With `image` and `disk`, creation waits for import and returns the resize task; use a queued job and wait before starting. Failed imports and timeouts do not automatically delete remote VMs.
 - Power methods: `start`, `shutdown`, `restart`, `pause`, `hibernate`, `stop`, `reset`, and `resume`. Mutations return `Task` objects. `stop` and `reset` are immediate operations; `shutdown` and `restart` request graceful guest shutdown.
+- Call `$vm->resetPassword(username: $localUsername, password: $newPassword)` to reset an existing local account on a running Linux or Windows VM. Enable the QEMU Guest Agent, allow password changes in the agent, and grant the API token `VM.GuestAgent.Unrestricted` on the VM. The method completes synchronously and throws a Laravel `RequestException` subclass on HTTP errors.
 - Memory is MiB, CPU cores are per socket, and `growDisk` adds GiB to an existing disk. Pending changes may require a restart. Mutations do not update snapshots; call `refresh()`.
 - `delete($purge = true)` destroys the remote VM and its unreferenced disks. Update application records separately after remote success.
 - Track tasks with `status()`, `isRunning()`, `wait()`, and `log()`, or reconnect using `$connection->task($upid)`. Keep the connection name alongside the UPID. `wait()` accepts `OK` and `WARNINGS: n` as success. Timeouts stop local polling without cancelling remote work.
@@ -93,6 +94,7 @@ $vm->growDisk('scsi0', 10)->wait();
 
 ## References
 
+- [Official Proxmox VE API viewer](https://pve.proxmox.com/pve-docs/api-viewer/) for native endpoint parameters and permissions; use documentation matching the Proxmox VE 9.x server version.
 - `README.md` for install, connection settings, creation parameters, management, testing, and upgrade guidance.
 - `config/proxmox.php` for the default stored connection name and configurable cluster model class.
 - `src/Models/Cluster.php` for stored connection settings and `client()`.

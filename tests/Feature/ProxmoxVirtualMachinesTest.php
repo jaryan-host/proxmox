@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Http\Client\Request;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
@@ -65,6 +66,63 @@ it('reads the configuration of a VM', function () {
 
     Http::assertSentCount(2);
 });
+
+it('resets the password of a VM guest account', function (string $username) {
+    $endpoint = API_URL.'/nodes/pve1/qemu/101/agent/set-user-password';
+    $password = ' New:+&%=password! ';
+
+    Http::fake([$endpoint => Http::response(['data' => ['result' => (object) []]])]);
+
+    Cluster::node('pve1')->virtualMachine(101)->resetPassword($username, $password);
+
+    Http::assertSent(function (Request $request) use ($endpoint, $username, $password): bool {
+        parse_str($request->body(), $body);
+
+        return $request->method() === 'POST'
+            && $request->url() === $endpoint
+            && $request->isForm()
+            && $body === ['username' => $username, 'password' => $password, 'crypted' => '0'];
+    });
+    Http::assertSentCount(1);
+})->with(['ubuntu', 'Administrator']);
+
+it('rejects invalid guest password reset inputs before sending a request', function (string $username, string $password, string $message) {
+    Http::fake();
+
+    $vm = Cluster::node('pve1')->virtualMachine(101);
+
+    expect(fn () => $vm->resetPassword($username, $password))->toThrow(InvalidArgumentException::class, $message);
+
+    Http::assertNothingSent();
+})->with([
+    'blank username' => [' ', 'new-password', 'username'],
+    'username with a colon' => ['user:name', 'new-password', 'username'],
+    'username with a newline' => ["user\nname", 'new-password', 'username'],
+    'empty password' => ['ubuntu', '', 'password'],
+    'password with a newline' => ['ubuntu', "new\npassword", 'password'],
+    'password with a NUL byte' => ['ubuntu', "new\0password", 'password'],
+]);
+
+it('surfaces guest password reset errors without exposing the request password in the exception message', function (int $status) {
+    $password = 'private-new-password';
+
+    Http::fake([
+        '*/agent/set-user-password' => Http::response(
+            ['message' => "Failed to set {$password}"],
+            $status,
+            $status === 307 ? ['Location' => 'https://redirect.example.test'] : [],
+        ),
+    ]);
+
+    $vm = Cluster::node('pve1')->virtualMachine(101);
+
+    expect(fn () => $vm->resetPassword('ubuntu', $password))->toThrow(function (RequestException $exception) use ($password, $status) {
+        expect($exception->response->status())->toBe($status)
+            ->and($exception->getMessage())->not->toContain($password);
+    });
+
+    Http::assertSentCount(1);
+})->with([307, 400, 403, 500]);
 
 it('grows a VM disk by a number of GiB and returns the resize task', function () {
     Http::fake([

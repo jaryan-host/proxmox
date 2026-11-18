@@ -1,7 +1,7 @@
 {
   "$schema": "https://getcomposer.org/schema.json",
   "name": "jaryan-host/proxmox",
-  "description": "A Laravel package for integrating with the Proxmox REST API.",
+  "description": "A Laravel package for integrating with the Proxmox VE 9 REST API.",
   "keywords": [
     "laravel",
     "jaryan-host",

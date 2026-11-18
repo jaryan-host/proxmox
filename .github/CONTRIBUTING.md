@@ -20,6 +20,7 @@ composer install
 ## Make a change
 
 - Keep changes focused and use Laravel-native package APIs and the existing service provider structure.
+- Check endpoint parameters, response shapes, and permissions against Proxmox VE 9.x documentation when changing API behavior.
 - Add focused Pest tests for behavior changes through public APIs, commands, routes, or published resources. Use Laravel HTTP fakes for Proxmox requests.
 - Update the README and relevant examples when public behavior changes. Keep `resources/boost/skills/proxmox-development/SKILL.md` aligned with consumer-facing changes.
 - Keep the package focused on cluster connections and the live Proxmox API. Applications own node and VM persistence, authorization, and service lifecycles.

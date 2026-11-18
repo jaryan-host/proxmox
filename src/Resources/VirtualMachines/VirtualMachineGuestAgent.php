@@ -5,18 +5,45 @@ declare(strict_types=1);
 namespace Proxmox\Resources\VirtualMachines;
 
 use Illuminate\Http\Client\RequestException;
+use InvalidArgumentException;
+use Proxmox\Exceptions\GuestPasswordResetException;
 use Proxmox\Proxmox;
 use Proxmox\Support\ResourceData;
 use Proxmox\Support\ResponseData;
+use SensitiveParameter;
 
 /**
- * Reads and formats information from the QEMU guest agent.
+ * Sends commands to the QEMU guest agent and processes their responses.
  *
  * @internal
  */
 final readonly class VirtualMachineGuestAgent
 {
     public function __construct(private Proxmox $client, private string $path) {}
+
+    public function resetPassword(string $username, #[SensitiveParameter] string $password): void
+    {
+        if (trim($username) === '' || strpbrk($username, ":\r\n\0") !== false) {
+            throw new InvalidArgumentException('The username must be non-blank and contain no colons, line breaks, or NUL bytes.');
+        }
+
+        if ($password === '' || strpbrk($password, "\r\n\0") !== false) {
+            throw new InvalidArgumentException('The password must be non-empty and contain no line breaks or NUL bytes.');
+        }
+
+        $response = $this->client->request('POST', $this->path.'/set-user-password', [
+            'allow_redirects' => false,
+            'form_params' => [
+                'username' => $username,
+                'password' => $password,
+                'crypted' => 0,
+            ],
+        ]);
+
+        if (! $response->successful()) {
+            throw new GuestPasswordResetException($response);
+        }
+    }
 
     /**
      * @return array{ipv4: list<string>|null, ipv6: list<string>|null}

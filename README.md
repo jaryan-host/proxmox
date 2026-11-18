@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/github/actions/workflow/status/jaryan-host/proxmox/tests.yml?branch=main&label=Tests&style=flat-square)](https://github.com/jaryan-host/proxmox/actions/workflows/tests.yml)
 [![License](https://img.shields.io/github/license/jaryan-host/proxmox?style=flat-square)](LICENSE.md)
 
-A Laravel package for the Proxmox VE REST API. Store named cluster connections with encrypted API credentials, fetch live nodes and QEMU virtual machines, and manage VMs through a fluent API.
+A Laravel package targeting the Proxmox VE 9.x REST API. Store named cluster connections with encrypted API credentials, fetch live nodes and QEMU virtual machines, and manage VMs through a fluent API.
 
 The package owns one table: `clusters`. Applications decide how to store, cache, authorize, and display node and VM data. Node and VM API resources hold no database records or ownership relations.
 
@@ -34,7 +34,9 @@ The package owns one table: `clusters`. Applications decide how to store, cache,
 | Laravel | `^12.0` or `^13.0`, with a compatible PHP version |
 | Database | A Laravel-supported database for cluster connections |
 | Encryption | An application encryption key for stored API token secrets |
-| Proxmox | A reachable Proxmox VE JSON API and an API token permitted to perform your operations |
+| Proxmox | Proxmox VE 9.x with a reachable JSON API and an API token permitted to perform your operations |
+
+Compatibility with earlier Proxmox VE major versions is unverified. Consult the [official API viewer](https://pve.proxmox.com/pve-docs/api-viewer/) with documentation matching your server version for native endpoint parameters and permissions.
 
 The resource API manages QEMU VMs. Use the raw HTTP client for other Proxmox endpoints.
 
@@ -377,6 +379,16 @@ $vm->shutdown(timeout: 60)->wait();
 | `reset()` | Immediately resets the VM |
 
 The optional shutdown/restart timeout is a non-negative number of seconds sent to Proxmox. It is separate from the timeout passed to `Task::wait()`. Immediate power-off and reset can cause guest data loss.
+
+### Resetting a guest password
+
+```php
+$vm->resetPassword(username: $localUsername, password: $newPassword);
+```
+
+The reset applies immediately to an existing local account on a running Linux or Windows VM. Enable the QEMU Guest Agent in Proxmox and make sure the agent is running inside the guest and allows password changes. The API token needs `VM.GuestAgent.Unrestricted` on the VM. Pass the account's exact username and the new plaintext password over a TLS-verified connection.
+
+`resetPassword()` returns `void` on success. If Proxmox rejects the operation, `GuestPasswordResetException` extends Laravel's `RequestException` and provides the HTTP status. Its message omits the response body because it can contain sensitive data.
 
 ### CPU, memory, and disks
 
