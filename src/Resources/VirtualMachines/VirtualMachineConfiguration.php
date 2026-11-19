@@ -7,6 +7,7 @@ namespace Proxmox\Resources\VirtualMachines;
 use Illuminate\Support\Arr;
 use InvalidArgumentException;
 use Proxmox\Support\Identifier;
+use Proxmox\Support\ResourceData;
 
 /**
  * @internal
@@ -50,7 +51,7 @@ final class VirtualMachineConfiguration
         }
 
         if (array_key_exists('image', $configuration)) {
-            $configuration['scsi0'] = self::identifier($configuration, 'storage').':0,import-from='.self::image($configuration['image']);
+            $configuration['scsi0'] = self::imageDisk($configuration['image'], $configuration['storage'] ?? null);
             $configuration += ['boot' => 'order=scsi0', 'serial0' => 'socket', 'vga' => 'serial0'];
         }
 
@@ -96,13 +97,63 @@ final class VirtualMachineConfiguration
         return Arr::except($configuration, ['disk', 'image', 'bridge', 'ip', 'prefix', 'gateway']);
     }
 
-    private static function image(mixed $image): string
+    public static function imageDisk(mixed $image, mixed $storage): string
     {
+        $storage = Identifier::name($storage, 'storage');
+
         if (! is_string($image) || preg_match('/^[a-zA-Z][a-zA-Z0-9_.-]*:import\/[a-zA-Z0-9][a-zA-Z0-9_.-]*\.(?:qcow2|raw)$/D', $image) !== 1) {
             throw new InvalidArgumentException('image must be an importable QCOW2 or RAW volume ID such as local:import/ubuntu.qcow2 or local:import/ubuntu.img.raw.');
         }
 
-        return $image;
+        return $storage.':0,import-from='.$image;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $config
+     * @return array<string, string>
+     */
+    public static function reinstallParameters(array $config, string $drive, string $storage, ?string $disk): array
+    {
+        $volumes = ResourceData::volumes($config);
+        $boot = $config['boot'] ?? null;
+        $bootOrder = is_string($boot) && preg_match('/(?:^|,)order=([^,]*)/', $boot, $matches) === 1
+            ? explode(';', $matches[1])
+            : [];
+
+        $disk ??= match (true) {
+            $bootOrder !== [] => array_values(array_intersect($bootOrder, array_keys($volumes)))[0] ?? null,
+            is_string($config['bootdisk'] ?? null) => $config['bootdisk'],
+            count($volumes) === 1 => array_key_first($volumes),
+            default => null,
+        };
+
+        if ($disk === null) {
+            throw new InvalidArgumentException('Could not determine the boot disk. Pass the OS disk key as disk.');
+        }
+
+        $existing = $config[$disk] ?? null;
+        $oldStorage = $volumes[$disk]['storage'] ?? null;
+
+        if ($oldStorage === null || ! is_string($existing)) {
+            throw new InvalidArgumentException("The OS disk {$disk} must be an attached, storage-backed hard disk.");
+        }
+
+        $options = [$drive];
+
+        foreach (explode(',', $existing) as $option) {
+            if (preg_match('/^([a-z][a-z0-9_-]*)=/', $option, $matches) !== 1
+                || in_array($matches[1], ['file', 'volume', 'size', 'format', 'import-from'], true)
+                || ($matches[1] === 'shared' && $oldStorage !== $storage)) {
+                continue;
+            }
+
+            $options[] = $option;
+        }
+
+        return [
+            $disk => implode(',', $options),
+            'boot' => 'order='.implode(';', array_unique([$disk, ...array_filter($bootOrder)])),
+        ];
     }
 
     /**

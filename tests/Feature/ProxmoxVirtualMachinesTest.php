@@ -161,6 +161,107 @@ it('validates disk growth arguments before sending a resize request', function (
     'negative size' => ['scsi0', -10, 'gibibytes must be a positive integer'],
 ]);
 
+it('reinstalls a stopped VM from an image by updating only its OS disk and boot order', function (?string $disk, array $boot, string $target, string $order) {
+    $digest = str_repeat('a', 40);
+    $config = $boot + [
+        'digest' => $digest,
+        'scsi0' => 'local-lvm:vm-101-disk-0,discard=on,size=32G',
+        'ide2' => 'local-lvm:vm-101-cloudinit,media=cdrom,size=4M',
+        'net0' => 'virtio=BC:24:11:00:00:01,bridge=vmbr0',
+        'ipconfig0' => 'ip=192.0.2.10/24,gw=192.0.2.1',
+        'ciuser' => 'ubuntu',
+        'cores' => 4,
+    ];
+
+    Http::fake([
+        '*/status/current' => Http::response(['data' => ['status' => 'stopped']]),
+        '*/config*' => fn (Request $request) => Http::response([
+            'data' => $request->method() === 'GET' ? $config : 'UPID:pve1:qmconfig',
+        ]),
+    ]);
+
+    $vm = Cluster::node('pve1')->virtualMachine(101);
+    $task = $vm->reinstallFromImage(image: 'local:import/debian.img.raw', storage: 'new-storage', disk: $disk);
+
+    expect($task->node)->toBe('pve1')
+        ->and($task->upid)->toBe('UPID:pve1:qmconfig')
+        ->and($vm->toArray())->toBe([]);
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && $request->url() === API_URL.'/nodes/pve1/qemu/101/config'
+        && $request->isForm()
+        && $request->data() === [
+            $target => 'new-storage:0,import-from=local:import/debian.img.raw,discard=on',
+            'boot' => 'order='.$order,
+            'digest' => $digest,
+        ]);
+    Http::assertSentCount(4);
+    Sleep::assertNeverSlept();
+})->with([
+    'cloud image defaults' => [null, ['boot' => 'order=scsi0'], 'scsi0', 'scsi0'],
+    'configured boot disk with PXE fallback' => [null, [
+        'boot' => 'order=net0;virtio1;scsi0',
+        'virtio1' => 'discard=on,file=local:101/vm-101-disk-1.qcow2,size=20G,shared=1',
+    ], 'virtio1', 'virtio1;net0;scsi0'],
+    'legacy boot disk' => [null, [
+        'boot' => 'cdn',
+        'bootdisk' => 'sata0',
+        'sata0' => 'local-lvm:vm-101-disk-1,discard=on,size=32G',
+    ], 'sata0', 'sata0'],
+    'sole disk' => [null, [], 'scsi0', 'scsi0'],
+    'explicit disk' => ['scsi1', ['scsi1' => 'local-lvm:vm-101-disk-1,discard=on,size=16G'], 'scsi1', 'scsi1'],
+]);
+
+it('rejects invalid reinstall arguments before any API request', function (string $image, string $storage, ?string $disk, string $message) {
+    Http::fake();
+
+    $vm = Cluster::node('pve1')->virtualMachine(101);
+
+    expect(fn () => $vm->reinstallFromImage($image, $storage, $disk))->toThrow(InvalidArgumentException::class, $message);
+
+    Http::assertNothingSent();
+})->with([
+    'installer ISO' => ['local:iso/debian.iso', 'local-lvm', null, 'image must be an importable'],
+    'invalid storage' => ['local:import/debian.qcow2', 'local:malformed', null, 'storage must be'],
+    'special disk key' => ['local:import/debian.qcow2', 'local-lvm', 'efidisk0', 'disk must be'],
+]);
+
+it('requires a stopped VM before reinstalling', function () {
+    Http::fake(['*/status/current' => Http::response(['data' => ['status' => 'running']])]);
+
+    $vm = Cluster::node('pve1')->virtualMachine(101);
+
+    expect(fn () => $vm->reinstallFromImage('local:import/debian.qcow2', 'local-lvm'))
+        ->toThrow(RuntimeException::class, 'must be stopped');
+
+    Http::assertSentCount(1);
+});
+
+it('does not change a VM whose configuration cannot be used to reinstall', function (array $overrides, array $pending, ?string $disk, string $exception, string $message) {
+    $config = $overrides + ['scsi0' => 'local-lvm:vm-101-disk-0,size=32G', 'digest' => str_repeat('a', 40)];
+
+    Http::fake([
+        '*/status/current' => Http::response(['data' => ['status' => 'stopped']]),
+        '*/config?current=1' => Http::response(['data' => $config]),
+        '*/config' => Http::response(['data' => $pending + $config]),
+    ]);
+
+    $vm = Cluster::node('pve1')->virtualMachine(101);
+
+    expect(fn () => $vm->reinstallFromImage('local:import/debian.qcow2', 'local-lvm', $disk))->toThrow($exception, $message);
+
+    Http::assertNotSent(fn (Request $request): bool => $request->method() !== 'GET');
+})->with([
+    'pending disk changes' => [[], ['scsi1' => 'local-lvm:vm-101-disk-1,size=16G'], null, RuntimeException::class, 'pending changes'],
+    'hibernated VM' => [['lock' => 'suspended'], [], null, RuntimeException::class, 'must be unlocked'],
+    'template' => [['template' => 1], [], null, RuntimeException::class, 'template'],
+    'invalid digest' => [['digest' => ''], [], null, UnexpectedResponseException::class, 'digest'],
+    'ambiguous OS disk' => [['scsi1' => 'local-lvm:vm-101-disk-1,size=16G'], [], null, InvalidArgumentException::class, 'Pass the OS disk'],
+    'missing disk' => [[], [], 'sata1', InvalidArgumentException::class, 'storage-backed hard disk'],
+    'host passthrough' => [['sata0' => '/dev/disk/by-id/os,size=32G'], [], 'sata0', InvalidArgumentException::class, 'storage-backed hard disk'],
+    'Cloud-Init drive' => [['ide2' => 'local-lvm:vm-101-cloudinit,media=cdrom'], [], 'ide2', InvalidArgumentException::class, 'storage-backed hard disk'],
+]);
+
 it('sets VM CPU cores and sockets and returns the configuration task', function () {
     Http::fake([
         '*/status/current' => Http::response(['data' => ['cpus' => 2, 'status' => 'running', 'vmid' => 101]]),

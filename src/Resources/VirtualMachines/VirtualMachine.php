@@ -17,6 +17,7 @@ use Proxmox\Resources\Tasks\Task;
 use Proxmox\Support\Identifier;
 use Proxmox\Support\ResourceData;
 use Proxmox\Support\ResponseData;
+use RuntimeException;
 use SensitiveParameter;
 
 /**
@@ -714,7 +715,55 @@ class VirtualMachine implements Arrayable, JsonSerializable
     }
 
     /**
-     * @param  array<string, int>  $parameters
+     * Replace the boot disk of a stopped VM from a QCOW2 or RAW import volume.
+     * Proxmox keeps the old disk as unused. Wait for the task before starting the VM.
+     *
+     * @throws ConnectionException
+     * @throws InvalidArgumentException
+     * @throws InvalidConfigurationException
+     * @throws RequestException
+     * @throws RuntimeException
+     * @throws UnexpectedResponseException
+     */
+    public function reinstallFromImage(string $image, string $storage, ?string $disk = null): Task
+    {
+        $drive = VirtualMachineConfiguration::imageDisk($image, $storage);
+
+        if ($disk !== null && preg_match('/^(?:ide|sata|scsi|virtio)[0-9]+$/D', $disk) !== 1) {
+            throw new InvalidArgumentException('disk must be a hard disk key such as scsi0 or virtio1.');
+        }
+
+        if (($this->status()['status'] ?? null) !== 'stopped') {
+            throw new RuntimeException('The VM must be stopped before reinstalling from an image.');
+        }
+
+        $config = $this->currentConfig();
+        $digest = $config['digest'] ?? null;
+
+        if (! is_string($digest) || preg_match('/^[a-f0-9]{40}$/D', $digest) !== 1) {
+            throw new UnexpectedResponseException('Expected a SHA-1 digest in the Proxmox VM configuration.');
+        }
+
+        if (! empty($config['template'])) {
+            throw new RuntimeException('A VM template cannot be reinstalled.');
+        }
+
+        if (isset($config['lock'])) {
+            throw new RuntimeException('The VM must be unlocked before reinstalling from an image.');
+        }
+
+        // Proxmox applies pending changes when updating a stopped VM.
+        if ($config !== $this->config()) {
+            throw new RuntimeException('The VM configuration changed or has pending changes. Resolve them before reinstalling.');
+        }
+
+        $parameters = VirtualMachineConfiguration::reinstallParameters($config, $drive, $storage, $disk);
+
+        return $this->configure($parameters + ['digest' => $digest]);
+    }
+
+    /**
+     * @param  array<string, int|string>  $parameters
      *
      * @throws ConnectionException
      * @throws InvalidConfigurationException

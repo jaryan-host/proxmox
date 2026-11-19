@@ -102,9 +102,11 @@ final class ResourceData
                 continue;
             }
 
-            $volume = explode(',', $value, 2)[0];
+            $volume = preg_match('/(?:^|,)(?:file|volume)=([^,]*)/', $value, $matches) === 1
+                ? $matches[1]
+                : explode(',', $value, 2)[0];
 
-            if ($volume === 'none' || str_contains($volume, 'cloudinit') || preg_match('/(?:^|,)media=cdrom(?:,|$)/', $value) === 1) {
+            if (in_array($volume, ['', 'none', 'cdrom'], true) || str_contains($volume, 'cloudinit') || preg_match('/(?:^|,)media=cdrom(?:,|$)/', $value) === 1) {
                 continue;
             }
 

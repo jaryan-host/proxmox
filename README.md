@@ -405,6 +405,32 @@ Values must be positive integers. `setCpu()` preserves the current socket count 
 
 `growDisk()` increases an existing disk by the supplied amount. It does not attach a disk, and Proxmox cannot shrink disks. Expanding guest partitions and filesystems remains the guest's responsibility.
 
+### Reinstalling from a cloud image
+
+Use `reinstallFromImage()` to replace the OS disk of an existing QEMU VM with a bootable QCOW2 or RAW image from Proxmox import storage. Select an image compatible with the VM's firmware and disk controller. The VM must be stopped and unlocked. Apply or revert pending VM configuration changes before reinstalling.
+
+```php
+$vm = Cluster::connection('hetzner')->node('pve1')->virtualMachine(101);
+
+if (($vm->status()['status'] ?? null) === 'running') {
+    $vm->shutdown(timeout: 60)->wait();
+}
+
+$task = $vm->reinstallFromImage(
+    image: 'local:import/debian.qcow2',
+    storage: 'local-lvm',
+);
+
+$task->wait(timeout: 900);
+$vm->start()->wait();
+```
+
+The method uses the first hard disk in the configured boot order, the legacy `bootdisk` setting, or the sole attached hard disk if neither is set. Pass `disk: 'virtio0'` to select the OS disk explicitly. The selected disk must be backed by Proxmox storage. The replacement uses the same slot and moves it to the front of the boot order. The VM keeps its ID, network, other disks, and existing Cloud-Init settings. Set up a Cloud-Init drive in Proxmox first if the image needs it and the VM lacks one.
+
+The new disk starts at the image's virtual size. To allocate more space, call `growDisk()` after the import task succeeds and before starting the VM. Keep the VM stopped until the task completes. The API token needs `VM.Audit` and `VM.Config.Disk` on the VM, access to the source volume, and `Datastore.AllocateSpace` on the destination storage.
+
+Proxmox keeps the previous OS volume under **Hardware → Unused Disk** when the VM owns it. To restore it, stop the VM, detach the replacement, and reattach the old volume in the original slot. Remove the old volume explicitly after verifying the new guest boots and you can access it. If the task fails or times out, inspect its status and the VM configuration before retrying.
+
 ### Deleting a VM
 
 Stop a running VM before requesting destruction:
