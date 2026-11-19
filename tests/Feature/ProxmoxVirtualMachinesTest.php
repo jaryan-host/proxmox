@@ -124,6 +124,136 @@ it('surfaces guest password reset errors without exposing the request password i
     Http::assertSentCount(1);
 })->with([307, 400, 403, 500]);
 
+it('configures a stopped VM for a new Cloud-Init guest without changing its drives or network', function (string $previousOsType, string $osType, string $cloudInitType, string $username) {
+    $config = [
+        'digest' => str_repeat('a', 40),
+        'ostype' => $previousOsType,
+        'citype' => $previousOsType === 'l26' ? 'nocloud' : 'configdrive2',
+        'ciuser' => $previousOsType === 'l26' ? 'ubuntu' : 'Administrator',
+        'sata1' => 'local-lvm:vm-101-cloudinit,media=cdrom,size=4M',
+        'net0' => 'virtio=BC:24:11:00:00:01,bridge=vmbr0',
+        'ipconfig0' => 'ip=192.0.2.10/24,gw=192.0.2.1',
+    ];
+    $settings = ['ostype' => $osType, 'citype' => $cloudInitType, 'ciuser' => $username];
+    $applied = $settings + ['digest' => str_repeat('b', 40)] + $config;
+    $password = 'Initial:+&%=password!';
+
+    Http::fake([
+        '*/status/current' => Http::response(['data' => ['status' => 'stopped']]),
+        '*/config*' => Http::sequence()
+            ->push(['data' => $config])
+            ->push(['data' => $config])
+            ->push(['data' => null])
+            ->push(['data' => $applied])
+            ->push(['data' => $applied])
+            ->push(['data' => null]),
+    ]);
+
+    Cluster::node('pve1')->virtualMachine(101)->configureCloudInit(
+        osType: $osType,
+        cloudInitType: $cloudInitType,
+        username: $username,
+        password: $password,
+    );
+
+    $configUrl = API_URL.'/nodes/pve1/qemu/101/config';
+    $requests = Http::recorded()->map(fn (array $pair): Request => $pair[0])->all();
+
+    expect(array_map(fn (Request $request): array => [$request->method(), $request->url()], $requests))->toBe([
+        ['GET', API_URL.'/nodes/pve1/qemu/101/status/current'],
+        ['GET', $configUrl.'?current=1'],
+        ['GET', $configUrl],
+        ['PUT', $configUrl],
+        ['GET', $configUrl.'?current=1'],
+        ['GET', $configUrl],
+        ['PUT', $configUrl],
+    ])->and($requests[3]->isForm())->toBeTrue()
+        ->and($requests[3]->data())->toBe($settings + ['digest' => $config['digest']])
+        ->and($requests[6]->isForm())->toBeTrue()
+        ->and($requests[6]->data())->toBe(['cipassword' => $password, 'digest' => $applied['digest']]);
+})->with([
+    'Linux to Windows' => ['l26', 'win11', 'configdrive2', 'Administrator'],
+    'Windows to Linux' => ['win11', 'l26', 'nocloud', 'debian'],
+]);
+
+it('withholds the Cloud-Init password when the OS settings fail or are not applied', function (int $status, string $exception) {
+    $config = ['digest' => str_repeat('a', 40), 'ostype' => 'l26', 'citype' => 'nocloud', 'ciuser' => 'ubuntu'];
+
+    Http::fake([
+        '*/status/current' => Http::response(['data' => ['status' => 'stopped']]),
+        '*/config*' => Http::sequence()
+            ->push(['data' => $config])
+            ->push(['data' => $config])
+            ->push(['data' => null], $status)
+            ->push(['data' => $config])
+            ->push(['data' => $config]),
+    ]);
+
+    $vm = Cluster::node('pve1')->virtualMachine(101);
+
+    expect(fn () => $vm->configureCloudInit('win11', 'configdrive2', 'Administrator', 'initial-password'))
+        ->toThrow($exception);
+
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'PUT' && $request['ostype'] === 'win11');
+    Http::assertNotSent(fn (Request $request): bool => array_key_exists('cipassword', $request->data()));
+})->with([
+    'settings update rejected' => [403, RequestException::class],
+    'settings still not applied' => [200, RuntimeException::class],
+]);
+
+it('omits an echoed Cloud-Init password from the password update exception', function () {
+    $config = ['digest' => str_repeat('a', 40), 'ostype' => 'l26', 'citype' => 'nocloud', 'ciuser' => 'ubuntu'];
+    $applied = ['digest' => str_repeat('b', 40), 'ostype' => 'win11', 'citype' => 'configdrive2', 'ciuser' => 'Administrator'];
+    $password = 'private-initial-password';
+
+    Http::fake([
+        '*/status/current' => Http::response(['data' => ['status' => 'stopped']]),
+        '*/config*' => Http::sequence()
+            ->push(['data' => $config])
+            ->push(['data' => $config])
+            ->push(['data' => null])
+            ->push(['data' => $applied])
+            ->push(['data' => $applied])
+            ->push(['message' => "Failed to set {$password}"], 400),
+    ]);
+
+    $vm = Cluster::node('pve1')->virtualMachine(101);
+
+    expect(fn () => $vm->configureCloudInit('win11', 'configdrive2', 'Administrator', $password))
+        ->toThrow(function (RequestException $exception) use ($password): void {
+            expect($exception->response->status())->toBe(400)
+                ->and($exception->getMessage())->not->toContain($password);
+        });
+});
+
+it('requires a stopped VM before changing Cloud-Init settings', function () {
+    Http::fake(['*/status/current' => Http::response(['data' => ['status' => 'running']])]);
+
+    $vm = Cluster::node('pve1')->virtualMachine(101);
+
+    expect(fn () => $vm->configureCloudInit('win11', 'configdrive2', 'Administrator', 'initial-password'))
+        ->toThrow(RuntimeException::class, 'must be stopped');
+
+    Http::assertSentCount(1);
+});
+
+it('rejects invalid Cloud-Init arguments before sending a request', function (string $osType, string $cloudInitType, string $username, string $password) {
+    Http::fake();
+
+    $vm = Cluster::node('pve1')->virtualMachine(101);
+
+    expect(fn () => $vm->configureCloudInit($osType, $cloudInitType, $username, $password))
+        ->toThrow(InvalidArgumentException::class);
+
+    Http::assertNothingSent();
+})->with([
+    'blank OS type' => [' ', 'configdrive2', 'Administrator', 'initial-password'],
+    'blank Cloud-Init type' => ['win11', '', 'Administrator', 'initial-password'],
+    'blank username' => ['win11', 'configdrive2', ' ', 'initial-password'],
+    'empty password' => ['win11', 'configdrive2', 'Administrator', ''],
+    'password with a newline' => ['win11', 'configdrive2', 'Administrator', "initial\npassword"],
+]);
+
 it('grows a VM disk by a number of GiB and returns the resize task', function () {
     Http::fake([
         '*/status/current' => Http::response(['data' => ['status' => 'running', 'vmid' => 101]]),

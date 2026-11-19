@@ -358,7 +358,7 @@ The individual methods and `usageHistory()` accept `timeframe` (`hour`, `day`, `
 
 ## Managing virtual machines
 
-All power and configuration operations return a `Proxmox\Resources\Tasks\Task`. Call `wait()` when subsequent work depends on completion:
+Power operations return a `Proxmox\Resources\Tasks\Task`. Call `wait()` when subsequent work depends on completion.
 
 ```php
 $vm = Cluster::connection('hetzner')->node('pve1')->virtualMachine(101);
@@ -430,6 +430,27 @@ The method uses the first hard disk in the configured boot order, the legacy `bo
 The new disk starts at the image's virtual size. To allocate more space, call `growDisk()` after the import task succeeds and before starting the VM. Keep the VM stopped until the task completes. The API token needs `VM.Audit` and `VM.Config.Disk` on the VM, access to the source volume, and `Datastore.AllocateSpace` on the destination storage.
 
 Proxmox keeps the previous OS volume under **Hardware → Unused Disk** when the VM owns it. To restore it, stop the VM, detach the replacement, and reattach the old volume in the original slot. Remove the old volume explicitly after verifying the new guest boots and you can access it. If the task fails or times out, inspect its status and the VM configuration before retrying.
+
+#### Switching between Linux and Windows
+
+After the disk import task succeeds, call `configureCloudInit()` on the stopped, unlocked VM with its existing Cloud-Init drive attached. Apply or revert pending VM configuration changes first. This example prepares a Windows 11 image configured to use `Administrator`.
+
+```php
+$vm->configureCloudInit(
+    osType: 'win11',
+    cloudInitType: 'configdrive2',
+    username: 'Administrator',
+    password: $initialPassword,
+);
+
+$vm->start()->wait();
+```
+
+The method applies `ostype`, `citype`, and `ciuser` before sending the supplied plaintext password as `cipassword`. It returns `void` after both updates succeed. Proxmox uses the applied OS type to handle the password and generates the new Cloud-Init data on the existing drive using the VM's network settings when it starts. For a switch back to Ubuntu or Debian, pass `l26` and `nocloud` with the target Linux username. The API token needs `VM.Audit`, `VM.Config.Options`, and `VM.Config.Cloudinit` on the VM.
+
+Use a Windows image with Cloudbase-Init configured to accept the injected password. Match `username` to the account configured in the Windows image. The application can send its completion notification after guest initialization, which can include a Windows reboot. [Proxmox Windows Cloud-Init guide](https://github.com/proxmox/pve-docs/blob/master/qm-cloud-init.adoc#cloud-init-on-windows)
+
+If the password update fails, the OS type, format, and username may already be applied. Keep the VM stopped and retry the configuration step. An HTTP error during the password update throws `CloudInitPasswordUpdateException`, a Laravel `RequestException` with a message limited to the HTTP status and operation.
 
 ### Deleting a VM
 

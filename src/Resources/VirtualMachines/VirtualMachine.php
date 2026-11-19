@@ -9,6 +9,7 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
 use InvalidArgumentException;
 use JsonSerializable;
+use Proxmox\Exceptions\CloudInitPasswordUpdateException;
 use Proxmox\Exceptions\GuestPasswordResetException;
 use Proxmox\Exceptions\InvalidConfigurationException;
 use Proxmox\Exceptions\UnexpectedResponseException;
@@ -114,6 +115,75 @@ class VirtualMachine implements Arrayable, JsonSerializable
     public function resetPassword(string $username, #[SensitiveParameter] string $password): void
     {
         $this->guestAgent()->resetPassword($username, $password);
+    }
+
+    /**
+     * Set the Cloud-Init options and password for the next boot of a stopped VM.
+     *
+     * @throws CloudInitPasswordUpdateException
+     * @throws ConnectionException
+     * @throws InvalidArgumentException
+     * @throws InvalidConfigurationException
+     * @throws RequestException
+     * @throws RuntimeException
+     * @throws UnexpectedResponseException
+     */
+    public function configureCloudInit(
+        string $osType,
+        string $cloudInitType,
+        string $username,
+        #[SensitiveParameter] string $password,
+    ): void {
+        foreach (compact('osType', 'cloudInitType', 'username') as $field => $value) {
+            if (trim($value) === '' || strpbrk($value, "\r\n\0") !== false) {
+                throw new InvalidArgumentException("{$field} must be non-blank and contain no line breaks or NUL bytes.");
+            }
+        }
+
+        if ($password === '' || strpbrk($password, "\r\n\0") !== false) {
+            throw new InvalidArgumentException('The password must be non-empty and contain no line breaks or NUL bytes.');
+        }
+
+        if (($this->status()['status'] ?? null) !== 'stopped') {
+            throw new RuntimeException('The VM must be stopped before configuring Cloud-Init.');
+        }
+
+        $config = $this->currentConfig();
+        $digest = $this->configurationDigest($config);
+
+        if (! empty($config['template'])) {
+            throw new RuntimeException('Cloud-Init can only be configured on a VM instance.');
+        }
+
+        if (isset($config['lock'])) {
+            throw new RuntimeException('The VM must be unlocked before configuring Cloud-Init.');
+        }
+
+        $this->assertNoPendingConfiguration($config, 'configuring Cloud-Init');
+
+        $path = $this->path('config');
+        $settings = ['ostype' => $osType, 'citype' => $cloudInitType, 'ciuser' => $username];
+        $this->client->put($path, $settings + ['digest' => $digest])->throw();
+
+        // Proxmox handles cipassword using the applied ostype.
+        $applied = $this->currentConfig();
+
+        foreach ($settings as $field => $value) {
+            if (($applied[$field] ?? null) !== $value) {
+                throw new RuntimeException('Proxmox did not apply the requested Cloud-Init settings.');
+            }
+        }
+
+        $this->assertNoPendingConfiguration($applied, 'updating the Cloud-Init password');
+
+        $response = $this->client->request('PUT', $path, [
+            'allow_redirects' => false,
+            'form_params' => ['cipassword' => $password, 'digest' => $this->configurationDigest($applied)],
+        ]);
+
+        if (! $response->successful()) {
+            throw new CloudInitPasswordUpdateException($response);
+        }
     }
 
     /**
@@ -738,11 +808,7 @@ class VirtualMachine implements Arrayable, JsonSerializable
         }
 
         $config = $this->currentConfig();
-        $digest = $config['digest'] ?? null;
-
-        if (! is_string($digest) || preg_match('/^[a-f0-9]{40}$/D', $digest) !== 1) {
-            throw new UnexpectedResponseException('Expected a SHA-1 digest in the Proxmox VM configuration.');
-        }
+        $digest = $this->configurationDigest($config);
 
         if (! empty($config['template'])) {
             throw new RuntimeException('A VM template cannot be reinstalled.');
@@ -752,14 +818,38 @@ class VirtualMachine implements Arrayable, JsonSerializable
             throw new RuntimeException('The VM must be unlocked before reinstalling from an image.');
         }
 
-        // Proxmox applies pending changes when updating a stopped VM.
-        if ($config !== $this->config()) {
-            throw new RuntimeException('The VM configuration changed or has pending changes. Resolve them before reinstalling.');
-        }
+        $this->assertNoPendingConfiguration($config, 'reinstalling');
 
         $parameters = VirtualMachineConfiguration::reinstallParameters($config, $drive, $storage, $disk);
 
         return $this->configure($parameters + ['digest' => $digest]);
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $config
+     *
+     * @throws UnexpectedResponseException
+     */
+    private function configurationDigest(array $config): string
+    {
+        $digest = $config['digest'] ?? null;
+
+        if (! is_string($digest) || preg_match('/^[a-f0-9]{40}$/D', $digest) !== 1) {
+            throw new UnexpectedResponseException('Expected a SHA-1 digest in the Proxmox VM configuration.');
+        }
+
+        return $digest;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $config
+     */
+    private function assertNoPendingConfiguration(array $config, string $operation): void
+    {
+        // Proxmox applies pending changes when updating a stopped VM.
+        if ($config !== $this->config()) {
+            throw new RuntimeException("The VM configuration changed or has pending changes. Resolve them before {$operation}.");
+        }
     }
 
     /**
